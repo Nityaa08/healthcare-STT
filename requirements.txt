@@ -1,9 +1,7 @@
 streamlit
-streamlit-webrtc
 torch
 transformers
+librosa
 keybert
 sentence-transformers
-nltk
-librosa
-av
+streamlit_audio_recorder
