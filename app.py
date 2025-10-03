@@ -1,74 +1,55 @@
 import streamlit as st
-from streamlit_webrtc import webrtc_streamer
-import av
-import numpy as np
 import torch
-from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
+from transformers import Wav2Vec2Processor, Wav2Vec2ForCTC
+import librosa
+import numpy as np
 from keybert import KeyBERT
 from sentence_transformers import SentenceTransformer
-import nltk
-import librosa
+from io import BytesIO
+from streamlit_audio_recorder import audio_recorder
 
-# Download NLTK data once
-nltk.download("stopwords")
-nltk.download("punkt")
-
-st.title("Healthcare Audio Keyword Extraction with Mic")
-
-# Load ASR and keyword extraction models once
-@st.cache_resource(show_spinner=False)
+# Load models once at startup
+@st.cache_resource
 def load_models():
     processor = Wav2Vec2Processor.from_pretrained("facebook/wav2vec2-base-960h")
     asr_model = Wav2Vec2ForCTC.from_pretrained("facebook/wav2vec2-base-960h")
     asr_model.eval()
-    embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
+    embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
     kw_model = KeyBERT(model=embedding_model)
     return processor, asr_model, kw_model
 
 processor, asr_model, kw_model = load_models()
 
-audio_frames = []
+st.title("Healthcare Audio Keyword Extractor 🎤")
 
-def audio_frame_callback(frame: av.AudioFrame):
-    audio = frame.to_ndarray(format="flt32")
-    audio_frames.append(audio.flatten())
-    return frame
+st.write("Record your voice, then we'll transcribe and extract keywords.")
 
-webrtc_ctx = webrtc_streamer(
-    key="mic",
-    audio_frame_callback=audio_frame_callback,
-    media_stream_constraints={"audio": True, "video": False},
-    async_processing=True,
-)
+# Record audio from mic
+audio_bytes = audio_recorder()
 
-if st.button("Stop and Process Audio"):
-    if not audio_frames:
-        st.warning("No audio recorded yet! Please speak into the mic.")
-    else:
-        audio_np = np.concatenate(audio_frames)
-        orig_sr = 48000  # typical mic audio sample rate
-        target_sr = 16000
+if audio_bytes is not None:
+    st.audio(audio_bytes, format="audio/wav")
 
-        # Resample to 16kHz
-        audio_16k = librosa.resample(audio_np, orig_sr=orig_sr, target_sr=target_sr)
+    # Load audio with librosa from bytes
+    audio_np, sr = librosa.load(BytesIO(audio_bytes), sr=16000)
 
-        # ASR inference
-        input_values = processor(audio_16k, sampling_rate=target_sr, return_tensors="pt", padding="longest").input_values
-        with torch.no_grad():
-            logits = asr_model(input_values).logits
+    # Run ASR
+    input_values = processor(audio_np, sampling_rate=sr, return_tensors="pt").input_values
+    with torch.no_grad():
+        logits = asr_model(input_values).logits
+    predicted_ids = torch.argmax(logits, dim=-1)
+    transcription = processor.decode(predicted_ids[0]).lower()
 
-        predicted_ids = torch.argmax(logits, dim=-1)
-        transcription = processor.decode(predicted_ids[0]).lower()
+    st.subheader("Transcription")
+    st.write(transcription)
 
-        st.subheader("Transcription")
-        st.write(transcription)
+    # Extract keywords
+    keywords = kw_model.extract_keywords(
+        transcription, keyphrase_ngram_range=(1, 3), stop_words='english', top_n=10
+    )
 
-        # Keyword extraction
-        keywords = kw_model.extract_keywords(transcription, keyphrase_ngram_range=(1, 3), stop_words="english", top_n=10)
-
-        st.subheader("Extracted Keywords")
-        for kw, score in keywords:
-            st.write(f"{kw} (score: {score:.2f})")
-
-        # Reset audio buffer for next recording
-        audio_frames.clear()
+    st.subheader("Extracted Keywords")
+    for kw, score in keywords:
+        st.write(f"- {kw} (score: {score:.3f})")
+else:
+    st.info("Click the record button to start recording your voice.")
